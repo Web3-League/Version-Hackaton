@@ -1,7 +1,7 @@
-import { User } from '../user/user.entity'; // Assurez-vous que le chemin est correct
+import { Request } from 'express';
 
 declare module 'express' {
   export interface Request {
-    user?: User;
+    user?: any; // Adjust the type as needed based on your user object
   }
 }

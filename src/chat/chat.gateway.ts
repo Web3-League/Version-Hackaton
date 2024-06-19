@@ -8,17 +8,22 @@ import {
   OnGatewayConnection,
   OnGatewayDisconnect,
 } from '@nestjs/websockets';
-import { Logger } from '@nestjs/common';
+import { Logger, UnauthorizedException, UseGuards } from '@nestjs/common';
 import { Server, Socket } from 'socket.io';
 import { ConfigService } from '@nestjs/config';
 import * as jwt from 'jsonwebtoken';
 import { UserService } from 'src/user/user.service';
-import { AuthService } from 'src/auth/auth.service';
 import { MessagesService } from 'src/message/messages.service';
+import { ServerService } from 'src/server/server.service';
+import { ChannelService } from 'src/channel/channel.service';
+import { CreateServerDto } from 'src/dto/create-server.dto';
+import { AuthService } from 'src/auth/auth.service';
+import { WebSocketGuard } from '../websocket.guard';
+
 
 @WebSocketGateway({
   cors: {
-    origin: 'http://localhost:3001',
+    origin: ['http://localhost:3001' , 'http://192.168.1.16:3001'], 
   },
 })
 export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect {
@@ -30,6 +35,8 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     private readonly userService: UserService,
     private readonly authService: AuthService,
     private readonly messagesService: MessagesService,
+    private readonly serverService: ServerService,
+    private readonly channelService: ChannelService,
   ) { }
 
   async afterInit(server: Server) {
@@ -43,10 +50,12 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
         if (err) {
           return next(new Error('Authentication error: Invalid token'));
         }
+
         socket.data.user = decoded;
         next();
       });
     });
+    this.logger.log('WebSocket server initialized');
   }
 
   handleConnection(client: Socket) {
@@ -57,97 +66,183 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
     this.logger.log(`Client disconnected: ${client.id}`);
   }
 
-
-  // Typing event handlers
+  @UseGuards(WebSocketGuard)
   @SubscribeMessage('typing')
   handleTyping(@MessageBody() username: string, @ConnectedSocket() client: Socket): void {
     client.broadcast.emit('user_typing', username);
   }
 
+  @UseGuards(WebSocketGuard)
   @SubscribeMessage('stop_typing')
   handleStopTyping(@MessageBody() username: string, @ConnectedSocket() client: Socket): void {
     client.broadcast.emit('stop_typing');
   }
 
-
-  // Server CRUD methods
-
-  @SubscribeMessage('create_server')
-  handleCreateServer(@MessageBody() data: any, @ConnectedSocket() client: Socket): void {
-    const newServer = {
-      id: Date.now(), // Replace with actual ID generation logic
-      name: data.name,
-      owner: client.data.user.userId,
-    };
-    // Save the new server to your database or in-memory storage
-    this.server.emit('server_created', newServer);
-  }
-
-  @SubscribeMessage('update_server')
-  handleUpdateServer(@MessageBody() data: any, @ConnectedSocket() client: Socket): void {
-    const updatedServer = {
-      id: data.id,
-      name: data.name,
-      owner: client.data.user.userId,
-    };
-    // Update the server in your database or in-memory storage
-    this.server.emit('server_updated', updatedServer);
-  }
-
-  @SubscribeMessage('delete_server')
-  handleDeleteServer(@MessageBody() data: any, @ConnectedSocket() client: Socket): void {
-    const serverId = data.id;
-    // Delete the server from your database or in-memory storage
-    this.server.emit('server_deleted', { id: serverId });
-  }
-
-  // Channel CRUD methods
-
+  @UseGuards(WebSocketGuard)
   @SubscribeMessage('create_channel')
-  handleCreateChannel(@MessageBody() data: any, @ConnectedSocket() client: Socket): void {
-    const newChannel = {
-      id: Date.now(), // Replace with actual ID generation logic
-      name: data.name,
-      serverId: data.serverId,
-      owner: client.data.user.userId,
-    };
-    // Save the new channel to your database or in-memory storage
-    this.server.emit('channel_created', newChannel);
+  async handleCreateChannel(@MessageBody() data: any, @ConnectedSocket() client: Socket): Promise<void> {
+    console.log('Received create_channel event with data:', data);
+
+    const ownerId = client.data.user.userId;
+    console.log('Owner ID from client data:', ownerId);
+
+    try {
+      const newChannel = await this.channelService.createChannel(data.name, data.serverId, ownerId);
+      console.log('New channel created:', newChannel);
+
+      client.emit('channel_created', newChannel);
+    } catch (error) {
+      console.error('Error creating channel:', error);
+      client.emit('error', { message: 'Error creating channel' });
+    }
   }
 
+  @UseGuards(WebSocketGuard)
   @SubscribeMessage('update_channel')
-  handleUpdateChannel(@MessageBody() data: any, @ConnectedSocket() client: Socket): void {
-    const updatedChannel = {
-      id: data.id,
-      name: data.name,
-      serverId: data.serverId,
-      owner: client.data.user.userId,
-    };
-    // Update the channel in your database or in-memory storage
+  async handleUpdateChannel(@MessageBody() data: any, @ConnectedSocket() client: Socket): Promise<void> {
+    const ownerId = client.data.user.userId;
+    const updatedChannel = await this.channelService.updateChannel(data.id, data.name, data.serverId, ownerId);
     this.server.emit('channel_updated', updatedChannel);
   }
 
+  @UseGuards(WebSocketGuard)
   @SubscribeMessage('delete_channel')
-  handleDeleteChannel(@MessageBody() data: any, @ConnectedSocket() client: Socket): void {
-    const channelId = data.id;
-    // Delete the channel from your database or in-memory storage
-    this.server.emit('channel_deleted', { id: channelId });
-  }
-  
-  @SubscribeMessage('message')
-  async handleMessage(
-    @MessageBody() content: string,
-    @MessageBody('channelId') channelId: number, // Extract channelId from message body
-    @ConnectedSocket() client: Socket
-  ): Promise<void> {
-    const { userId, username } = client.data.user;
-    const message = await this.messagesService.create(content, userId, username, channelId);
-    this.server.emit('message', message);
+  async handleDeleteChannel(@MessageBody() data: any, @ConnectedSocket() client: Socket): Promise<void> {
+    await this.channelService.deleteChannel(data.id);
+    this.server.emit('channel_deleted', { id: data.id });
   }
 
-  @SubscribeMessage('get_messages')
-  async handleGetMessages(@ConnectedSocket() client: Socket): Promise<void> {
-    const messages = await this.messagesService.findAll();
-    client.emit('messages', messages);
+  @UseGuards(WebSocketGuard)
+  @SubscribeMessage('send_message')
+  async handleMessage(
+    @MessageBody() data: { userId: number, text: string, channelId: number, fileUrl?: string },
+    @ConnectedSocket() client: Socket,
+  ): Promise<void> {
+    try {
+      console.log('Received message data:', data);
+      const user = await this.userService.findById(data.userId);
+      if (!data.channelId) {
+        client.emit('error', 'Channel ID must be provided');
+        return;
+      }
+
+      const message = await this.messagesService.create(user.id, data.text, data.channelId, data.fileUrl);
+      const room = `channel:${data.channelId}`;
+      this.server.to(room).emit('message', message);
+    } catch (error) {
+      console.error('Error sending message:', error);
+      client.emit('error', 'Failed to send message');
+    }
   }
+
+  @UseGuards(WebSocketGuard)
+  @SubscribeMessage('get_messages')
+  async handleGetMessages(
+    @MessageBody() data: { channelId: number },
+    @ConnectedSocket() client: Socket,
+  ): Promise<void> {
+    try {
+      console.log(`Received get_messages request for channelId: ${data.channelId}`); // Log request
+      const messages = await this.messagesService.findByChannelId(data.channelId);
+      console.log('Sending messages from historical data:', messages); // Log messages to be sent
+      client.emit('messages', messages);
+    } catch (error) {
+      console.error('Error fetching messages:', error);
+      client.emit('error', 'Failed to fetch messages');
+    }
+  }
+
+
+
+  @UseGuards(WebSocketGuard)
+  @SubscribeMessage('joinServer')
+  async handleJoinServer(@MessageBody() data: { serverId: number }, @ConnectedSocket() client: Socket) {
+    if (!client.data.user) {
+      client.emit('error', { message: 'Unauthorized access' });
+      throw new UnauthorizedException('Unauthorized access');
+    }
+    const server = await this.serverService.findById(data.serverId);
+    client.join(`server-${server.id}`);
+  }
+
+  @UseGuards(WebSocketGuard)
+  @SubscribeMessage('leave_server')
+  async handleLeaveServer(@MessageBody() data: { serverId: number }, @ConnectedSocket() client: Socket) {
+    if (!client.data.user) {
+      client.emit('error', { message: 'Unauthorized access' });
+      throw new UnauthorizedException('Unauthorized access');
+    }
+    const server = await this.serverService.findById(data.serverId);
+    client.leave(`server-${server.id}`);
+  }
+
+  @UseGuards(WebSocketGuard)
+  @SubscribeMessage('fetch_servers')
+  async handleFetchServers(@MessageBody() data: { userId: number }, @ConnectedSocket() client: Socket) {
+    const servers = await this.serverService.getServersForUser(data.userId);
+    client.emit('servers', { servers });
+  }
+
+  @UseGuards(WebSocketGuard)
+  @SubscribeMessage('fetch_channels')
+  async handleFetchChannels(
+    @MessageBody() data: { serverId: number },
+    @ConnectedSocket() client: Socket,
+  ): Promise<void> {
+    const channels = await this.channelService.findChannelsByServer(data.serverId);
+    console.log('Fetched channels for serverId:', data.serverId, 'Channels:', channels);
+    client.emit('channels', channels);
+  }
+
+  @UseGuards(WebSocketGuard)
+  @SubscribeMessage('create_server')
+  async handleCreateServer(
+    @MessageBody() createServerDto: CreateServerDto,
+    @ConnectedSocket() client: Socket,
+  ) {
+    console.log('Received create_server event with data:', createServerDto);
+
+    if (!client.data.user) {
+      client.emit('error', { message: 'Unauthorized access' });
+      throw new UnauthorizedException('Unauthorized access');
+    }
+
+    try {
+      const owner = await this.userService.findById(createServerDto.owner);
+      if (!owner) {
+        console.error('Owner not found');
+        client.emit('error', { message: 'Owner not found' });
+        return;
+      }
+      const newServer = await this.serverService.create(createServerDto, owner);
+      console.log('Server created successfully:', newServer);
+      client.emit('server_created', newServer);
+    } catch (error) {
+      console.error('Error creating server:', error);
+      client.emit('error', { message: 'Error creating server' });
+    }
+  }
+
+  @UseGuards(WebSocketGuard)
+  @SubscribeMessage('delete_server')
+  async handleDeleteServer(@MessageBody() data: { serverId: number }, @ConnectedSocket() client: Socket) {
+    if (!client.data.user) {
+      client.emit('error', { message: 'Unauthorized access' });
+      throw new UnauthorizedException('Unauthorized access');
+    }
+    try {
+      await this.serverService.remove(data.serverId);
+      client.emit('server_deleted', data.serverId);
+    } catch (error) {
+      client.emit('error', { message: 'Error deleting server' });
+    }
+  }
+  
+  @UseGuards(WebSocketGuard)
+  @SubscribeMessage('fetch_all_channels')
+  async handleFetchAllChannels(@ConnectedSocket() client: Socket): Promise<void> {
+    const channels = await this.channelService.findAll(); // Ensure findAll method exists in your channel service
+    client.emit('fetched_channels', channels);
+  }
+
 }

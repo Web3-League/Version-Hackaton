@@ -1,8 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, FindOneOptions } from 'typeorm';
+import { Repository, FindOneOptions, Like } from 'typeorm';
 import { User } from './user.entity';
 import * as crypto from 'crypto';
+import { CreateUserDto } from 'src/dto/create-user.dto';
 
 @Injectable()
 export class UserService {
@@ -18,9 +19,6 @@ export class UserService {
     return this.userRepository.save(user);
   }
 
-  async findByEmail(email: string): Promise<User | undefined> {
-    return this.userRepository.findOne({ where: { email } });
-  }
 
   async validateUser(email: string, password: string): Promise<User | null> {
     const user = await this.findByEmail(email);
@@ -43,4 +41,43 @@ export class UserService {
   async findAll(): Promise<User[]> {
     return this.userRepository.find();
   }
+  async create(createUserDto: CreateUserDto): Promise<User> {
+    const user = this.userRepository.create(createUserDto);
+    return this.userRepository.save(user);
+  }
+
+  async findByEmail(email: string): Promise<User | undefined> {
+    return this.userRepository.findOne({ where: { email } });
+  }
+
+  async findOne(id: number): Promise<User> {
+    return this.userRepository.findOne({ where: { id } });
+  }
+
+  async updateUser(id: number, updateUserDto: Partial<CreateUserDto>): Promise<User> {
+    await this.userRepository.update(id, updateUserDto);
+    return this.findOne(id);
+  }
+
+
+
+  async searchUsers(query: string): Promise<{ id: number, username: string, email: string }[]> {
+    if (!query || query.trim() === '') {
+      return [];
+    }
+    return this.userRepository.find({
+      where: [
+        { username: Like(`%${query}%`) },
+        { email: Like(`%${query}%`) },
+      ],
+      select: ['id', 'username', 'email']
+    });
+  }
+
+  async findOneByEmail(email: string): Promise<User | undefined> {
+    return this.userRepository.findOne({ where: { email } });
+  }
+
+
+  
 }

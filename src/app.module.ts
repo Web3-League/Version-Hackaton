@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { TypeOrmModule } from '@nestjs/typeorm';
@@ -16,6 +16,8 @@ import { ServerService } from './server/server.service';
 import { ServerModule } from './server/server.module';
 import { Server } from './server/server.entity';
 import { User } from './user/user.entity';
+import { AuthController } from './auth/auth.controller';
+import { Reaction } from './message/reaction.entity';
 
 @Module({
   imports: [
@@ -39,11 +41,14 @@ import { User } from './user/user.entity';
     TypeOrmModule.forFeature([Channel]),
     TypeOrmModule.forFeature([Server]),
     TypeOrmModule.forFeature([User]),
+    TypeOrmModule.forFeature([Reaction]),
     MessagesModule,
     ChannelModule,
     ServerModule,
   ],
-  controllers: [AppController],
-  providers: [AppService, ChatGateway, MessagesService, ChannelService, ServerService],
+  controllers: [AppController, AuthController],
+  providers: [AppService, ChatGateway, MessagesService, ChannelService, ServerService, ServerService,],
 })
-export class AppModule { }
+export class AppModule {
+
+}

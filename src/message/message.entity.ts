@@ -9,7 +9,7 @@ export class Message {
   id: number;
 
   @Column()
-  content: string;
+  text: string;
 
   @Column({ nullable: true })
   fileUrl?: string;
@@ -25,4 +25,10 @@ export class Message {
 
   @ManyToOne(() => Channel, channel => channel.messages)
   channel: Channel;
+
+
+
 }
+
+
+export { Message as MessageEntity };

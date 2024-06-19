@@ -16,3 +16,5 @@ export class Reaction {
   @ManyToOne(() => Message, message => message.reactions)
   message: Message;
 }
+
+export { Reaction as ReactionEntity };
