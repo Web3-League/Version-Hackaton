@@ -18,6 +18,9 @@ import { Server } from './server/server.entity';
 import { User } from './user/user.entity';
 import { AuthController } from './auth/auth.controller';
 import { Reaction } from './message/reaction.entity';
+import { WebSocketGuard } from './websocket.guard';
+import { WinstonModule } from 'nest-winston';
+import * as winston from 'winston';
 
 @Module({
   imports: [
@@ -45,9 +48,31 @@ import { Reaction } from './message/reaction.entity';
     MessagesModule,
     ChannelModule,
     ServerModule,
+
+    WinstonModule.forRoot({
+      transports: [
+        new winston.transports.Console({
+          format: winston.format.combine(
+            winston.format.timestamp(),
+            winston.format.printf(({ timestamp, level, message }) => {
+              return `${timestamp} ${level}: ${message}`;
+            })
+          ),
+        }),
+        new winston.transports.File({
+          filename: 'combined.log',
+          format: winston.format.combine(
+            winston.format.timestamp(),
+            winston.format.printf(({ timestamp, level, message }) => {
+              return `${timestamp} ${level}: ${message}`;
+            })
+          ),
+        }),
+      ],
+    }),
   ],
   controllers: [AppController, AuthController],
-  providers: [AppService, ChatGateway, MessagesService, ChannelService, ServerService, ServerService,],
+  providers: [AppService, ChatGateway, MessagesService, ChannelService, ServerService, ServerService, WebSocketGuard, ],
 })
 export class AppModule {
 

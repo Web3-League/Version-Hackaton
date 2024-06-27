@@ -13,6 +13,7 @@ async function bootstrap() {
   // Configuration globale de CORS avec une fonction pour définir l'origine
   app.enableCors({
     origin: (origin, callback) => {
+      
       // Autoriser toutes les origines si l'origine n'est pas définie
       callback(null, true);
     },

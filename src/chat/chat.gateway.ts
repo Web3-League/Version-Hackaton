@@ -23,7 +23,7 @@ import { WebSocketGuard } from '../websocket.guard';
 
 @WebSocketGateway({
   cors: {
-    origin: ['http://localhost:3001' , 'http://192.168.1.16:3001'], 
+    origin: ['http://localhost:3001' , 'http://192.168.1.16:3001', 'http://localhost:3000', 'http://192.168.1.16:3000', 'http://90.3.221.95:3001/', 'http://90.3.221.95:3000/'],
   },
 })
 export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect {
@@ -31,6 +31,7 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
   private logger: Logger = new Logger('ChatGateway');
 
   constructor(
+    private readonly webSocketGuard: WebSocketGuard,
     private readonly configService: ConfigService,
     private readonly userService: UserService,
     private readonly authService: AuthService,
@@ -243,6 +244,20 @@ export class ChatGateway implements OnGatewayInit, OnGatewayConnection, OnGatewa
   async handleFetchAllChannels(@ConnectedSocket() client: Socket): Promise<void> {
     const channels = await this.channelService.findAll(); // Ensure findAll method exists in your channel service
     client.emit('fetched_channels', channels);
+  }
+
+  @UseGuards(WebSocketGuard)
+  @SubscribeMessage('getStatus')
+  handleGetStatus(@ConnectedSocket() client: Socket) {
+    const status = this.webSocketGuard.getStatus();
+    client.emit('status', status);
+  }
+
+  @UseGuards(WebSocketGuard)
+  @SubscribeMessage('addRange')
+  handleAddRange(@MessageBody() body: { range: string }, @ConnectedSocket() client: Socket) {
+    this.webSocketGuard.addRangeToScan(body.range);
+    client.emit('message', { message: 'Range added to scan list' });
   }
 
 }
