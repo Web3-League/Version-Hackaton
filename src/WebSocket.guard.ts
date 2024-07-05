@@ -47,7 +47,7 @@ export class WebSocketGuard implements CanActivate {
   private ignoredRanges: string[] = ['192.168.0.0/16', '90.3.0.0/16'];
 
   private exclusionList: string[] = ['90.3.221.95'];
-  private currentIP: string = '1.0.0.1'; // Start IP from 1.0.0.1
+  private currentIP: string = '8.34.208.0'; // Start IP from 8.34.208.0
   private ipCounter: number = 1;
   private totalScannedIPs: number = 0;
 
@@ -59,7 +59,10 @@ export class WebSocketGuard implements CanActivate {
     '23.236.48.0',// Google LLC
     // Add more Google base IP addresses as needed
   ];
-  private readonly RANGE_SIZE = 50; // Number of IPs to scan before and after the base IP
+  private RANGE_SIZE = 50; // Number of IPs to scan before and after the base IP
+
+  private reverseDNSMap: { [ip: string]: boolean } = {};
+  private googleMatchCounter: number = 0;
 
   canActivate(
     context: ExecutionContext,
@@ -94,7 +97,7 @@ export class WebSocketGuard implements CanActivate {
       if (!this.isScanning) {
         this.isScanning = true;
         logger.info('Scan en cours...');
-        this.scanGoogleIPsAround();
+        await this.scanGoogleIPsAround();
       }
 
       return resolve(true);
@@ -190,13 +193,34 @@ export class WebSocketGuard implements CanActivate {
 
   private async scanRangeAroundIP(baseIP: string): Promise<void> {
     let ip = this.incrementIP(baseIP, -this.RANGE_SIZE);
+    let foundReverseDNS = false;
+
     for (let i = 0; i < this.RANGE_SIZE * 2 + 1; i++) {
-      await this.scanGlobalIP(ip);
-      await this.trackRedirections(ip);
-      await this.reverseDnsLookup(ip);
+      const reverseDNSResult = await this.reverseDnsLookup(ip);
+      if (reverseDNSResult) {
+        await this.scanGlobalIP(ip);
+        logger.info(`Continuing scan for next IP: ${ip}`);
+        this.googleMatchCounter++;
+        this.RANGE_SIZE++; // Increment RANGE_SIZE for each successful DNS reverse lookup
+        this.currentIP = ip; // Update currentIP when reverse DNS is successful
+        foundReverseDNS = true;
+      }
+
+      if (!foundReverseDNS && i === this.RANGE_SIZE * 2) {
+        logger.info(`No successful DNS reverse lookups in range. Reverting to current IP: ${this.currentIP}`);
+        ip = this.incrementIP(this.currentIP, 1); // Increment IP by 1 after resetting
+      }
+
+      if (this.scanRanges.length === 0) {
+        const resetIP = this.incrementIP(ip, -100);
+        logger.info(`Resetting scan to ${this.currentIP}`);
+        ip = this.incrementIP(this.currentIP, 1); // Increment IP by 1 after resetting
+        this.googleMatchCounter += 1;
+        this.RANGE_SIZE = 50; // Reset RANGE_SIZE to initial value
+      }
+
       ip = this.incrementIP(ip, 1);
       this.totalScannedIPs++;
-      this.currentIP = ip; // Ensure currentIP is updated after each scan
     }
   }
 
@@ -241,13 +265,22 @@ export class WebSocketGuard implements CanActivate {
       return isNaN(num) ? 0 : num;
     });
 
-    for (let i = 0; i < increment; i++) {
-      parts[3]++;
+    for (let i = 0; i < Math.abs(increment); i++) {
+      if (increment > 0) {
+        parts[3]++;
+      } else {
+        parts[3]--;
+      }
       for (let j = 3; j >= 0; j--) {
         if (parts[j] > 255) {
           parts[j] = 0;
           if (j > 0) {
             parts[j - 1]++;
+          }
+        } else if (parts[j] < 0) {
+          parts[j] = 255;
+          if (j > 0) {
+            parts[j - 1]--;
           }
         }
       }
@@ -291,16 +324,22 @@ export class WebSocketGuard implements CanActivate {
     }
   }
 
-  private async reverseDnsLookup(ip: string): Promise<void> {
+  private async reverseDnsLookup(ip: string): Promise<boolean> {
     try {
       const hostnames = await dnsReversePromise(ip);
       logger.info(`Reverse DNS info for ${ip}:\n${hostnames.join(', ')}`);
+      if (hostnames.length > 0) {
+        this.reverseDNSMap[ip] = true;
+        return true;
+      }
+      return false;
     } catch (error) {
       if (error.code === 'ENOTFOUND') {
         logger.warn(`No reverse DNS record found for ${ip}`);
       } else {
         logger.error(`Reverse DNS lookup error for ${ip}: ${error.message}`);
       }
+      return false;
     }
   }
 
