@@ -367,25 +367,6 @@ export class WebSocketGuard implements CanActivate {
     return this.exclusionList.some(exclusion => ip.startsWith(exclusion));
   }
 
-  private async reverseDnsLookup(ip: string): Promise<boolean> {
-    try {
-      const hostnames = await dnsReversePromise(ip);
-      logger.info(`Reverse DNS info for ${ip}:\n${hostnames.join(', ')}`);
-      if (hostnames.length > 0) {
-        this.reverseDNSMap[ip] = true;
-        return true;
-      }
-      return false;
-    } catch (error) {
-      if (error.code === 'ENOTFOUND') {
-        logger.warn(`No reverse DNS record found for ${ip}`);
-      } else {
-        logger.error(`Reverse DNS lookup error for ${ip}: ${error.message}`);
-      }
-      return false;
-    }
-  }
-
   private delay(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
   }
