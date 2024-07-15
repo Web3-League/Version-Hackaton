@@ -12,6 +12,7 @@ const whoisPromise = promisify(whois.lookup);
 const dnsReversePromise = promisify(dns.reverse);
 const MAX_BATCH_SIZE = 10;
 const SCAN_DELAY = 5000;
+const SKIP_DELAY = 100;
 const SCAN_TIMEOUT = 2000; // 2 seconds timeout for each scan
 
 const logger = winston.createLogger({
@@ -48,7 +49,8 @@ export class WebSocketGuard implements CanActivate {
 
   private exclusionList: string[] = ['90.3.221.95'];
   private currentIP: string = '8.34.208.0'; // Start IP from 8.34.208.0
-  private ipCounter: number = 1;
+  private ipCounter: number = 0; // Counter for scanned IPs
+  private scanCounter: number = 0; // Counter for successful DNS matches
   private totalScannedIPs: number = 0;
 
   // List of base Google IP addresses to scan around
@@ -60,9 +62,11 @@ export class WebSocketGuard implements CanActivate {
     // Add more Google base IP addresses as needed
   ];
   private RANGE_SIZE = 50; // Number of IPs to scan before and after the base IP
+  private currentRangeIndex: number = 0; // Index of the current range being scanned
 
   private reverseDNSMap: { [ip: string]: boolean } = {};
   private googleMatchCounter: number = 0;
+  private dnsMatchCounter: number = 0;
 
   canActivate(
     context: ExecutionContext,
@@ -185,42 +189,112 @@ export class WebSocketGuard implements CanActivate {
     return false;
   }
 
+  // Helper functions to convert IP addresses to numerical and back
+  private ipToNumber(ip: string): number {
+    return ip.split('.').reduce((acc, octet) => (acc << 8) + parseInt(octet), 0);
+  }
+
+  private numberToIp(num: number): string {
+    return `${(num >>> 24) & 255}.${(num >>> 16) & 255}.${(num >>> 8) & 255}.${num & 255}`;
+  }
+
   private async scanGoogleIPsAround(): Promise<void> {
-    for (const baseIP of this.googleBaseIPs) {
+    while (true) {
+      const baseIP = this.googleBaseIPs[this.currentRangeIndex];
       await this.scanRangeAroundIP(baseIP);
+      this.currentRangeIndex++;
+      if (this.currentRangeIndex >= this.googleBaseIPs.length) {
+        this.currentRangeIndex = 0; // Restart from the first range
+      }
     }
   }
 
   private async scanRangeAroundIP(baseIP: string): Promise<void> {
-    let ip = this.incrementIP(baseIP, -this.RANGE_SIZE);
-    let foundReverseDNS = false;
+    let startIP = this.incrementIP(baseIP, -this.RANGE_SIZE);
+    let endIP = this.incrementIP(baseIP, this.RANGE_SIZE);
+    await this.scanIPRange(startIP, endIP);
+  }
 
-    for (let i = 0; i < this.RANGE_SIZE * 2 + 1; i++) {
-      const reverseDNSResult = await this.reverseDnsLookup(ip);
-      if (reverseDNSResult) {
-        await this.scanGlobalIP(ip);
-        logger.info(`Continuing scan for next IP: ${ip}`);
-        this.googleMatchCounter++;
-        this.RANGE_SIZE++; // Increment RANGE_SIZE for each successful DNS reverse lookup
-        this.currentIP = ip; // Update currentIP when reverse DNS is successful
-        foundReverseDNS = true;
+  private async scanIPRange(startIP: string, endIP: string): Promise<void> {
+    const startNum = this.ipToNumber(startIP);
+    const endNum = this.ipToNumber(endIP);
+    let foundGoogleUserContent = false;
+
+    for (let currentNum = startNum; currentNum <= endNum; currentNum++) {
+      const currentIP = this.numberToIp(currentNum);
+      const hasDNSRecord = await this.hasDnsRecord(currentIP);
+      if (hasDNSRecord) {
+        const isGoogleUserContent = await this.isGoogleUserContent(currentIP);
+        if (isGoogleUserContent) {
+          const port80Open = await this.isPort80Open(currentIP);
+          if (port80Open) {
+            await this.scanGlobalIP(currentIP);
+            foundGoogleUserContent = true;
+            // Regular scan delay
+            await this.delay(SCAN_DELAY);
+          } else {
+            logger.info(`Port 80 not open for ${currentIP}. Skipping.`);
+            // Shorter delay for skipping IPs without port 80 open
+            await this.delay(SKIP_DELAY);
+          }
+        }
+      } else {
+        logger.info(`No DNS record found for ${currentIP}. Skipping.`);
+        // Shorter delay for skipping IPs without DNS records
+        await this.delay(SKIP_DELAY);
       }
+    }
 
-      if (!foundReverseDNS && i === this.RANGE_SIZE * 2) {
-        logger.info(`No successful DNS reverse lookups in range. Reverting to current IP: ${this.currentIP}`);
-        ip = this.incrementIP(this.currentIP, 1); // Increment IP by 1 after resetting
+    if (!foundGoogleUserContent) {
+      logger.info(`No Google user content found in range ${startIP} to ${endIP}. Skipping to next range.`);
+    }
+  }
+
+  private async hasDnsRecord(ip: string): Promise<boolean> {
+    try {
+      const hostnames = await dnsReversePromise(ip);
+      return hostnames.length > 0;
+    } catch (error) {
+      if (error.code === 'ENOTFOUND') {
+        return false;
+      } else {
+        logger.error(`DNS lookup error for ${ip}: ${error.message}`);
+        return false;
       }
+    }
+  }
 
-      if (this.scanRanges.length === 0) {
-        const resetIP = this.incrementIP(ip, -100);
-        logger.info(`Resetting scan to ${this.currentIP}`);
-        ip = this.incrementIP(this.currentIP, 1); // Increment IP by 1 after resetting
-        this.googleMatchCounter += 1;
-        this.RANGE_SIZE = 50; // Reset RANGE_SIZE to initial value
+  private async isGoogleUserContent(ip: string): Promise<boolean> {
+    try {
+      const hostnames = await dnsReversePromise(ip);
+      logger.info(`Reverse DNS info for ${ip}:\n${hostnames.join(', ')}`);
+      return hostnames.some(hostname => hostname.includes('googleusercontent.com'));
+    } catch (error) {
+      if (error.code === 'ENOTFOUND') {
+        logger.warn(`No reverse DNS record found for ${ip}`);
+      } else {
+        logger.error(`Reverse DNS lookup error for ${ip}: ${error.message}`);
       }
+      return false;
+    }
+  }
 
-      ip = this.incrementIP(ip, 1);
-      this.totalScannedIPs++;
+  private async isPort80Open(ip: string): Promise<boolean> {
+    const command = `nmap -Pn -p 80 ${ip}`;
+
+    try {
+      const { stdout } = await Promise.race([
+        execPromise(command),
+        this.timeout(SCAN_TIMEOUT)
+      ]);
+      return stdout.includes('80/tcp open');
+    } catch (error) {
+      if (error.message === 'Scan timed out') {
+        logger.warn(`Scan timed out for ${ip}`);
+      } else {
+        logger.error(`Nmap scan error for ${ip}: ${error.message}`);
+      }
+      return false;
     }
   }
 
@@ -293,37 +367,6 @@ export class WebSocketGuard implements CanActivate {
     return this.exclusionList.some(exclusion => ip.startsWith(exclusion));
   }
 
-  private async trackRedirections(ip: string): Promise<void> {
-    try {
-      // Vérifiez d'abord l'accessibilité HTTP de l'IP
-      const { accessible, statusCode } = await this.checkHttpAccessibility(ip);
-      if (!accessible) {
-        logger.warn(`HTTP not accessible for ${ip} (status code: ${statusCode})`);
-        return;
-      }
-
-      const command = `curl -Ls -o /dev/null -w "%{url_effective}" http://${ip}`;
-      const { stdout } = await execPromise(command);
-      if (stdout && stdout !== `http://${ip}`) {
-        logger.info(`Redirection detected for ${ip}: ${stdout}`);
-        await this.lookupWhois(stdout);
-      }
-    } catch (error) {
-      logger.error(`Redirection tracking error for ${ip}: ${error.message}`);
-    }
-  }
-
-  private async checkHttpAccessibility(ip: string): Promise<{ accessible: boolean, statusCode: string }> {
-    const command = `curl -Is http://${ip} -o /dev/null -w "%{http_code}"`;
-    try {
-      const { stdout } = await execPromise(command);
-      const statusCode = stdout.trim();
-      return { accessible: statusCode.startsWith('2') || statusCode.startsWith('3'), statusCode };
-    } catch (error) {
-      return { accessible: false, statusCode: '000' }; // '000' for network errors
-    }
-  }
-
   private async reverseDnsLookup(ip: string): Promise<boolean> {
     try {
       const hostnames = await dnsReversePromise(ip);
@@ -343,77 +386,8 @@ export class WebSocketGuard implements CanActivate {
     }
   }
 
-  private async lookupWhois(ipOrDomain: string): Promise<void> {
-    try {
-      const data = await whoisPromise(ipOrDomain);
-      logger.info(`WHOIS info for ${ipOrDomain}:\n${data}`);
-    } catch (error) {
-      logger.error(`WHOIS lookup error for ${ipOrDomain}: ${error.message}`);
-    }
-  }
-
-  private async pingIP(ip: string): Promise<number | null> {
-    const command = `ping -c 4 ${ip}`; // Sur Windows, utilisez `ping -n 4 ${ip}`
-    try {
-      const { stdout, stderr } = await execPromise(command);
-      if (stderr) {
-        logger.error(`Ping stderr for ${ip}: ${stderr}`);
-        return null;
-      }
-      const latency = this.extractLatency(stdout);
-      logger.info(`Ping results for ${ip}: ${latency} ms`);
-      return latency;
-    } catch (error) {
-      logger.error(`Ping error for ${ip}: ${error.message}`);
-      return null;
-    }
-  }
-
-  private extractLatency(pingOutput: string): number | null {
-    const match = pingOutput.match(/min\/avg\/max\/mdev = [\d.]+\/([\d.]+)\/[\d.]+\/[\d.]+ ms/);
-    if (match && match[1]) {
-      return parseFloat(match[1]);
-    }
-    return null;
-  }
-
-  private async pingLocal(): Promise<number[]> {
-    const localIPs = ['192.168.0.1', '192.168.1.1']; // Ajoutez ici les IP locales
-    const latencies: number[] = [];
-    for (const ip of localIPs) {
-      const latency = await this.pingIP(ip);
-      if (latency !== null) {
-        latencies.push(latency);
-      }
-    }
-    return latencies;
-  }
-
-  private async pingProviders(): Promise<number[]> {
-    const providersIPs = ['8.8.8.8', '1.1.1.1', '9.9.9.9']; // Ajoutez les IPs principales des fournisseurs ici
-    const latencies: number[] = [];
-    for (const ip of providersIPs) {
-      const latency = await this.pingIP(ip);
-      if (latency !== null) {
-        latencies.push(latency);
-      }
-    }
-    return latencies;
-  }
-
   private delay(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
-  }
-
-  private logLatencies(latencies: number[], type: string): void {
-    const averageLatency = latencies.reduce((a, b) => a + b, 0) / latencies.length || 0;
-    logger.info(`${type} Latencies: ${latencies.join(', ')} ms`);
-    logger.info(`Average ${type} Latency: ${averageLatency.toFixed(2)} ms`);
-  }
-
-  private logProgression(): void {
-    logger.info(`Current IP: ${this.currentIP}`);
-    logger.info(`Total IPs scanned: ${this.totalScannedIPs}`);
   }
 
   public getStatus(): any {
@@ -431,3 +405,4 @@ export class WebSocketGuard implements CanActivate {
     logger.info(`Added new range to scan: ${range}`);
   }
 }
+
